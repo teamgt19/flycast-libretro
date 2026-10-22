@@ -17,6 +17,7 @@
 	 along with flycast.  If not, see <https://www.gnu.org/licenses/>.
  */
 #include "maple_devs.h"
+#include "rave_track_reader.h"
 #include "maple_if.h"
 #include "hw/naomi/naomi_cart.h"
 #include <xxhash.h>
@@ -1044,7 +1045,7 @@ class jvs_namco_fcb : public jvs_io_board
 {
 public:
 	jvs_namco_fcb(u8 node_id, MIEImpl *parent, int first_player = 0)
-		: jvs_io_board(node_id, parent, first_player)
+		: jvs_io_board(node_id, parent, first_player), fcbNode(node_id)
 	{
 		player_count = 1;
 		coin_input_count = 2;
@@ -1060,12 +1061,62 @@ protected:
 	u16 read_analog_axis(int player_num, int player_axis, bool inverted) override {
 		if (init_in_progress)
 			return 0;
-		const MapleInputState& inputState = mapleInputState[std::min(player_num, (int)std::size(mapleInputState) - 1)];
-		if (inputState.absPos.x < 0 || inputState.absPos.x > 639 || inputState.absPos.y < 0 || inputState.absPos.y > 479)
+		int x, y;
+		if (!raveSword(x, y))
+		{
+			const MapleInputState& inputState = mapleInputState[std::min(player_num, (int)std::size(mapleInputState) - 1)];
+			x = inputState.absPos.x;
+			y = inputState.absPos.y;
+		}
+		if (x < 0 || x > 639 || y < 0 || y > 479)
 			return 0;
 		else
 			return 0x8000;
 	}
+
+	void read_lightgun(int playerNum, u32 buttons, u16& x, u16& y) override
+	{
+		int sx, sy;
+		if ((buttons & NAOMI_RELOAD_KEY) == 0 && raveSword(sx, sy))
+		{
+			x = (u16)sx;
+			y = (u16)sy;
+			return;
+		}
+		jvs_io_board::read_lightgun(playerNum, buttons, x, y);
+	}
+
+private:
+	/* RAVE (TeamGT): Mazan's sword from RAVE's VR hands (Local\RAVE_TRACK_V1, rave_track_reader.h). The real
+	 * cabinet tracks the sword in 3-D; its two FCB boards each report a point - here board 1 (node 1) gets the sword's
+	 * TIP and board 2 the HILT (the hand), so the game sees where the blade is and its angle. Each point is the sword
+	 * point straight in front of the picture (its x / y in the picture's frame), scaled from a play area
+	 * MAZAN_PLAY_AREA times the picture's size onto 640x480. Which board is tip / hilt and the play area are guesses to
+	 * check in the game's calibration screen. False = RAVE isn't writing: the light gun position as before. */
+	bool raveSword(int& x, int& y)
+	{
+		static constexpr float MAZAN_PLAY_AREA = 1.25f;
+		static constexpr bool MAZAN_TIP_ON_BOARD_1 = true;
+		rave_track_block track;
+		if (!rave_track::read(track) || !(track.hands[0].flags & RAVE_HAND_TRACKED)
+				|| track.screen_width <= 0.01f || track.screen_height <= 0.01f)
+			return false;
+		const rave_track_hand& hand = track.hands[0];
+		const bool tip = (fcbNode == 1) == MAZAN_TIP_ON_BOARD_1;
+		const float* p = tip ? hand.tip : hand.position;
+		const float u = p[0] / (track.screen_width * MAZAN_PLAY_AREA) + 0.5f;
+		const float v = 0.5f - p[1] / (track.screen_height * MAZAN_PLAY_AREA);
+		x = (int)std::clamp(u * 640.f, 0.f, 65535.f);
+		y = (int)std::clamp(v * 480.f, 0.f, 65535.f);
+		// a point beyond the edge reads as off the picture (> 639 / > 479)
+		if (u < 0.f || u > 1.f)
+			x = 0xFFFF;
+		if (v < 0.f || v > 1.f)
+			y = 0xFFFF;
+		return true;
+	}
+
+	u8 fcbNode;  // which of Mazan's two boards I am (the base keeps its node id private)
 };
 
 // Gun Survivor
