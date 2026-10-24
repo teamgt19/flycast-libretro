@@ -23,10 +23,42 @@
 #include "cfg/option.h"
 
 #include <algorithm>
+#include <cstdlib>
 #include <vector>
+#ifdef _WIN32
+#include <process.h>
+#else
+#include <unistd.h>
+#endif
 
 class NetworkOutput
 {
+	// RAVE: several copies run at once (one per cabinet), so each one listens on the port RAVE hands it in
+	// RAVE_OUTPUT_PORT when it starts it; 8000 + the driving sim slave number (Flycast's own ports) when that is not set.
+	static u16 listenPort()
+	{
+		const char *text = std::getenv("RAVE_OUTPUT_PORT");
+		if (text != nullptr && *text != '\0')
+		{
+			char *end = nullptr;
+			long port = std::strtol(text, &end, 10);
+			if (end != nullptr && *end == '\0' && port > 0 && port < 65536)
+				return (u16)port;
+		}
+		return (u16)(8000 + settings.naomi.drivingSimSlave);
+	}
+
+	// RAVE: who is talking, sent to each client on connect (before the game's name).
+	static std::string raveHello()
+	{
+#ifdef _WIN32
+		int pid = _getpid();
+#else
+		int pid = (int)getpid();
+#endif
+		return "rave_emulator = flycast\nrave_pid = " + std::to_string(pid) + "\n";
+	}
+
 	void init()
 	{
 		if (!config::NetworkOutput || settings.naomi.slave || settings.naomi.drivingSimSlave == 1) {
@@ -45,7 +77,7 @@ class NetworkOutput
 		socklen_t saddr_len = sizeof(saddr);
 		saddr.sin_family = AF_INET;
 		saddr.sin_addr.s_addr = INADDR_ANY;
-		saddr.sin_port = htons(8000 + settings.naomi.drivingSimSlave);
+		saddr.sin_port = htons(listenPort());
 		if (::bind(server, (sockaddr *)&saddr, saddr_len) < 0)
 		{
 			perror("Network output: bind failed");
@@ -108,6 +140,17 @@ private:
 		if (sockfd != INVALID_SOCKET)
 		{
 			set_non_blocking(sockfd);
+			{
+				std::string hello = raveHello();
+				if (::send(sockfd, hello.c_str(), hello.length(), 0) < 0)
+				{
+					int error = get_last_error();
+					if (error != L_EWOULDBLOCK && error != L_EAGAIN) {
+						closesocket(sockfd);
+						return;
+					}
+				}
+			}
 			if (gameNameSent)
 			{
 				std::string msg = "game = " + settings.content.gameId + "\n";
